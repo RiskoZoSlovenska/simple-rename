@@ -1,7 +1,7 @@
 local fs = require("fs")
 local Buffer = require("Buffer").Buffer
-local path = require("path")
-local fileType = require("file-type")
+local pathlib = require("path")
+local getFileType = require("file-type")
 
 local MIN_BYTES = 262
 
@@ -11,83 +11,108 @@ local function printf(fmt, ...)
 	return print(string.format(fmt, ...))
 end
 
+local function assert2(func, ...)
+	return assert(func(...))
+end
 
-local function cleanName(name)
+
+local function randomString(size)
+	local buf = {}
+
+	for i = 1, size do
+		buf[i] = string.char(math.random(97, 122))
+	end
+
+	return table.concat(buf)
+end
+
+
+local function getMimeMain(mime)
+	return mime:match("^%a+")
+end
+
+local function splitName(name)
+	local ext = pathlib.extname(name)
+	local root = pathlib.basename(name, ext)
+
+	return root, ext
+end
+
+local function cleanRoot(name)
 	return (name
 		:gsub("[^a-zA-Z0-9%-_ ]", "")
 		:match("^%s*(.-)%s*$")
-		:gsub("^$", "empty")
+		:gsub("^$", randomString(6))
 	)
 end
 
 
 local function readFile(filePath)
-	local fd, err1 = fs.openSync(filePath, "r")
-	if not fd then return nil, err1 end
+	local fd = assert2(fs.openSync, filePath, "r")
+	local bytes = assert2(fs.readSync, fd, MIN_BYTES, 0)
+	assert2(fs.closeSync, fd)
 
-	local bytes, err2 = fs.readSync(fd, MIN_BYTES, 0)
-	if not bytes then return nil, err2 end
+	return Buffer:new(bytes)
+end
 
-	local success, err3 = fs.closeSync(fd)
-	if not success then return nil, err3 end
+local function getMimeOfFile(path)
+	local buffer = readFile(path)
 
-	return Buffer:new(bytes), nil
+	local fileType = getFileType(buffer)
+	if not fileType then return nil, nil end
+
+	return fileType.mime, "." .. fileType.ext
 end
 
 
-local function processFile(dir, oldBase)
-	local oldFull = path.join(dir, oldBase)
-	local oldExt = path.extname(oldBase)
-	local rootName = oldBase:sub(1, -(#oldExt + 1))
 
-	local actualExt, actualMime
-	do
-		local buf, err = readFile(oldFull)
-		if not buf then
-			printf("Warning: Unable to read file %q because: %s", oldFull, err)
-			return nil, nil
+local function processFile(dir, oldName)
+	local oldPath = pathlib.join(dir, oldName)
+	local oldRoot, oldExt = splitName(oldName)
+	local mime, newExt = getMimeOfFile(oldPath)
+
+	if not mime                     then return false end
+	if oldExt:lower() == newExt     then return false end
+	if getMimeMain(mime) ~= "image" then return false end
+
+	local newRoot = cleanRoot(oldRoot)
+	local newName = newRoot .. newExt
+	local newPath = pathlib.join(dir, newName)
+
+	if fs.existsSync(newPath) then
+		printf("!!! Did not rename %s to %s because already exists", oldName, newName)
+		return false
+	end
+
+	assert2(fs.renameSync, oldPath, newPath)
+
+	printf("%s:\n  %s -> %s", oldRoot, oldExt, newExt)
+	if newRoot ~= oldRoot then
+		printf("  %s", newRoot)
+	end
+	return true
+end
+
+local function processDir(dir)
+	printf("Renaming in %q...", dir)
+	local renamed = 0
+
+	for name, t in fs.scandirSync(dir) do
+		if t ~= "file" then goto continue end
+
+		local success, res = pcall(processFile, dir, name)
+		if not success then
+			printf("Error when renaming %s:\n%s", name, res)
+		elseif res then
+			renamed = renamed + 1
 		end
 
-		local res = fileType(buf)
-		if not res then return nil, nil end
-
-		actualExt, actualMime = ("." .. res.ext), res.mime
+		::continue::
 	end
 
-	if oldExt == actualExt then return end
-	if not actualMime:find("^image/") then return end
-
-	local newBase = cleanName(rootName) .. actualExt
-	local newFull = path.join(dir, newBase)
-
-	if fs.existsSync(newFull) then
-		printf("!!! Did not rename %s to %s because already exists", oldBase, newBase)
-		return nil, nil
-	end
-
-	fs.renameSync(oldFull, newFull)
-	return oldBase, actualExt
-end
-
-
-local function rename(dir)
-	print("Renaming...")
-	local numRenamed = 0
-
-	for basename, fType in fs.scandirSync(dir) do
-		if fType == "file" then
-			local old, new = processFile(basename)
-
-			if new then
-				numRenamed = numRenamed + 1
-				print(new .. " <- " .. old)
-			end
-		end
-	end
-
-	printf("Finished! Renamed %d files.", numRenamed)
+	printf("Finished! Renamed %d file(s).", renamed)
 end
 
 
 
-rename(args[2] or "/sdcard/Download")
+processDir(args[2] or "/sdcard/Download")
